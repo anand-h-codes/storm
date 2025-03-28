@@ -35,9 +35,11 @@ import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.net.BindException;
 import java.net.ServerSocket;
+import java.net.URLDecoder;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.WritableByteChannel;
+import java.nio.charset.StandardCharsets;
 import java.security.Principal;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -306,7 +308,7 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
         NIMBUS_SUBJECT.getPrincipals().add(new NimbusPrincipal());
         NIMBUS_SUBJECT.setReadOnly();
     }
-    
+
     private static final TopologyStateTransition NOOP_TRANSITION = (arg, nimbus, topoId, base) -> null;
     private static final TopologyStateTransition INACTIVE_TRANSITION = (arg, nimbus, topoId, base) -> Nimbus.make(TopologyStatus.INACTIVE);
     private static final TopologyStateTransition ACTIVE_TRANSITION = (arg, nimbus, topoId, base) -> Nimbus.make(TopologyStatus.ACTIVE);
@@ -3216,7 +3218,7 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
         ret.allComponents = new HashSet<>(ret.taskToComponent.values());
         return ret;
     }
-    
+
     @VisibleForTesting
     public boolean awaitLeadership(long timeout, TimeUnit timeUnit) throws InterruptedException {
         return leaderElector.awaitLeadership(timeout, timeUnit);
@@ -4107,6 +4109,8 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
                 state.setupBlob(key, ni, getVersionForKey(key, ni, zkClient));
             }
             LOG.debug("Created state in zookeeper {} {} {}", state, store, ni);
+        } catch (KeyNotFoundException e) {
+            LOG.warn("Key not found while creating state in zookeeper - key: " + key, e);
         } catch (Exception e) {
             LOG.warn("Exception while creating state in zookeeper - key: " + key, e);
             if (e instanceof TException) {
@@ -4717,26 +4721,27 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
                 nodeToHost = Collections.emptyMap();
             }
 
+            String sanitizedComponentId = URLDecoder.decode(componentId, StandardCharsets.UTF_8);
             ComponentPageInfo compPageInfo = StatsUtil.aggCompExecsStats(exec2HostPort, info.taskToComponent, info.beats, window,
-                                                                         includeSys, topoId, topology, componentId);
+                                                                         includeSys, topoId, topology, sanitizedComponentId);
             if (compPageInfo.get_component_type() == ComponentType.SPOUT) {
-                NormalizedResourceRequest spoutResources = ResourceUtils.getSpoutResources(topology, topoConf, componentId);
+                NormalizedResourceRequest spoutResources = ResourceUtils.getSpoutResources(topology, topoConf, sanitizedComponentId);
                 if (spoutResources == null) {
-                    spoutResources = new NormalizedResourceRequest(topoConf, componentId);
+                    spoutResources = new NormalizedResourceRequest(topoConf, sanitizedComponentId);
                 }
                 compPageInfo.set_resources_map(spoutResources.toNormalizedMap());
             } else { //bolt
-                NormalizedResourceRequest boltResources = ResourceUtils.getBoltResources(topology, topoConf, componentId);
+                NormalizedResourceRequest boltResources = ResourceUtils.getBoltResources(topology, topoConf, sanitizedComponentId);
                 if (boltResources == null) {
-                    boltResources = new NormalizedResourceRequest(topoConf, componentId);
+                    boltResources = new NormalizedResourceRequest(topoConf, sanitizedComponentId);
                 }
                 compPageInfo.set_resources_map(boltResources.toNormalizedMap());
             }
             compPageInfo.set_topology_name(info.topoName);
-            compPageInfo.set_errors(stormClusterState.errors(topoId, componentId));
+            compPageInfo.set_errors(stormClusterState.errors(topoId, sanitizedComponentId));
             compPageInfo.set_topology_status(extractStatusStr(info.base));
             if (info.base.is_set_component_debug()) {
-                DebugOptions debug = info.base.get_component_debug().get(componentId);
+                DebugOptions debug = info.base.get_component_debug().get(sanitizedComponentId);
                 if (debug != null) {
                     compPageInfo.set_debug_options(debug);
                 }
@@ -4747,7 +4752,7 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
                 List<Integer> tasks = compToTasks.get(StormCommon.EVENTLOGGER_COMPONENT_ID);
                 tasks.sort(null);
                 // Find the task the events from this component route to.
-                int taskIndex = TupleUtils.chooseTaskIndex(Collections.singletonList(componentId), tasks.size());
+                int taskIndex = TupleUtils.chooseTaskIndex(Collections.singletonList(sanitizedComponentId), tasks.size());
                 int taskId = tasks.get(taskIndex);
                 String host = null;
                 Integer port = null;
@@ -5310,7 +5315,7 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
     private static class ClusterSummaryMetrics implements MetricSet {
         private static final String SUMMARY = "summary";
         private final Map<String, com.codahale.metrics.Metric> metrics = new HashMap<>();
-        
+
         public com.codahale.metrics.Metric put(String key, com.codahale.metrics.Metric value) {
             return metrics.put(MetricRegistry.name(SUMMARY, key), value);
         }
@@ -5320,12 +5325,12 @@ public class Nimbus implements Iface, Shutdownable, DaemonCommon {
             return metrics;
         }
     }
-    
+
     private class ClusterSummaryMetricSet implements Runnable {
         private static final int CACHING_WINDOW = 5;
-        
+
         private final ClusterSummaryMetrics clusterSummaryMetrics = new ClusterSummaryMetrics();
-        
+
         private final Function<String, Histogram> registerHistogram = (name) -> {
             //This histogram reflects the data distribution across only one ClusterSummary, i.e.,
             // data distribution across all entities of a type (e.g., data from all nimbus/topologies) at one moment.
